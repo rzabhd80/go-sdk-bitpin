@@ -141,12 +141,12 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	client.SecretKey = opts.SecretKey
 
 	if err := client.handleAutoRefresh(); err != nil {
-		return nil, fmt.Errorf("error handling auto refresh: %v", err)
+		return nil, err
 	}
 
 	if opts.ApiKey != "" && opts.SecretKey != "" {
 		if _, err := client.Authenticate(opts.ApiKey, opts.SecretKey); err != nil {
-			return nil, fmt.Errorf("error authenticating: %v", err)
+			return nil, err
 		}
 	}
 
@@ -176,10 +176,16 @@ func NewClient(opts ClientOptions) (*Client, error) {
 //   - Otherwise, returns nil to indicate the client is authenticated.
 func assertAuth(client *Client) error {
 	if client.AccessToken == "" {
-		return errors.New("access token is empty")
+		return &GoBitpinError{
+			Message: "access token is empty",
+			Err:     nil,
+		}
 	}
 	if client.RefreshToken == "" {
-		return errors.New("refresh token is empty")
+		return &GoBitpinError{
+			Message: "refresh token is empty",
+			Err:     nil,
+		}
 	}
 	return nil
 }
@@ -252,12 +258,12 @@ func (c *Client) handleAutoRefresh() error {
 	if c.AccessToken != "" {
 		decoded, err := u.DecodeJWT(c.AccessToken)
 		if err != nil {
-			return fmt.Errorf("error decoding access token: %v", err)
+			return err
 		}
 		if decoded.IsExpired() {
 			err = c.RefreshAccessToken()
 			if err != nil {
-				return fmt.Errorf("error refreshing access token: %v", err)
+				return err
 			}
 		}
 	}
@@ -265,17 +271,20 @@ func (c *Client) handleAutoRefresh() error {
 	if c.RefreshToken != "" {
 		decoded, err := u.DecodeJWT(c.RefreshToken)
 		if err != nil {
-			return fmt.Errorf("error decoding refresh token: %v", err)
+			return err
 		}
 
 		if decoded.IsExpired() {
 			if c.ApiKey == "" || c.SecretKey == "" {
-				return errors.New("API key and/or secret key are empty")
+				return &GoBitpinError{
+					Message: "API key and/or secret key are empty",
+					Err:     nil,
+				}
 			}
 
 			_, err = c.Authenticate(c.ApiKey, c.SecretKey)
 			if err != nil {
-				return fmt.Errorf("error re-authenticating: %v", err)
+				return err
 			}
 		}
 	}
@@ -334,6 +343,8 @@ func (c *Client) handleAutoRefresh() error {
 //   - `handleAutoRefresh` for automatic token refresh.
 //   - `assertAuth` for ensuring authentication tokens are valid.
 //   - `APIError` for structured error responses.
+//
+// Request sends an HTTP request to the specified URL and handles the response
 func (c *Client) Request(method string, url string, auth bool, body interface{}, result interface{}) error {
 	var reqBody []byte
 	var err error
@@ -342,7 +353,13 @@ func (c *Client) Request(method string, url string, auth bool, body interface{},
 		if body != nil {
 			urlParams, err := u.StructToURLParams(body)
 			if err != nil {
-				return fmt.Errorf("error converting struct to URL params: %v", err)
+				return &RequestError{
+					GoBitpinError: GoBitpinError{
+						Message: "failed to convert struct to URL params",
+						Err:     err,
+					},
+					Operation: "preparing request parameters",
+				}
 			}
 			url += "?" + urlParams
 		}
@@ -352,14 +369,26 @@ func (c *Client) Request(method string, url string, auth bool, body interface{},
 		if body != nil {
 			reqBody, err = json.Marshal(body)
 			if err != nil {
-				return fmt.Errorf("error marshaling Request body: %v", err)
+				return &RequestError{
+					GoBitpinError: GoBitpinError{
+						Message: "failed to marshal request body",
+						Err:     err,
+					},
+					Operation: "preparing request body",
+				}
 			}
 		}
 	}
 
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(reqBody))
 	if err != nil {
-		return fmt.Errorf("error creating Request: %v", err)
+		return &RequestError{
+			GoBitpinError: GoBitpinError{
+				Message: "failed to create request",
+				Err:     err,
+			},
+			Operation: "creating request",
+		}
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -367,12 +396,18 @@ func (c *Client) Request(method string, url string, auth bool, body interface{},
 	if auth {
 		if c.AutoRefresh {
 			if err := c.handleAutoRefresh(); err != nil {
-				return err
+				return &GoBitpinError{
+					Message: "failed to refresh authentication",
+					Err:     err,
+				}
 			}
 		}
 
 		if err := assertAuth(c); err != nil {
-			return err
+			return &GoBitpinError{
+				Message: "authentication validation failed",
+				Err:     err,
+			}
 		}
 
 		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
@@ -380,31 +415,42 @@ func (c *Client) Request(method string, url string, auth bool, body interface{},
 
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("error sending Request: %v", err)
+		return &RequestError{
+			GoBitpinError: GoBitpinError{
+				Message: "failed to send request",
+				Err:     err,
+			},
+			Operation: "sending request",
+		}
 	}
 	defer func(Body io.ReadCloser) {
-		err = Body.Close()
-		if err != nil {
-			fmt.Println("error closing response body:", err)
-		}
+		_ = Body.Close()
 	}(resp.Body)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("error reading response body: %v", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    string(respBody),
+		return &RequestError{
+			GoBitpinError: GoBitpinError{
+				Message: "failed to read response body",
+				Err:     err,
+			},
+			Operation: "reading response",
 		}
 	}
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return parseErrorResponse(resp.StatusCode, respBody)
+	}
+
 	if result != nil {
-		err = json.Unmarshal(respBody, result)
-		if err != nil {
-			return fmt.Errorf("error unmarshaling response: %v", err)
+		if err = json.Unmarshal(respBody, result); err != nil {
+			return &RequestError{
+				GoBitpinError: GoBitpinError{
+					Message: "failed to unmarshal response",
+					Err:     err,
+				},
+				Operation: "parsing response",
+			}
 		}
 	}
 
@@ -494,7 +540,10 @@ func (c *Client) ApiRequest(method, endpoint string, version string, auth bool, 
 //   - "authentication failed: %v" for other API or request errors.
 func (c *Client) Authenticate(apiKey, secretKey string) (*t.AuthenticationResponse, error) {
 	if apiKey == "" || secretKey == "" {
-		return nil, errors.New("API key and/or secret key are empty")
+		return nil, &GoBitpinError{
+			Message: "API key and/or secret key are empty",
+			Err:     nil,
+		}
 	}
 
 	reqBody := map[string]string{
@@ -511,14 +560,14 @@ func (c *Client) Authenticate(apiKey, secretKey string) (*t.AuthenticationRespon
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case 401:
-				return nil, fmt.Errorf("authentication failed: invalid API key or secret key")
+				return nil, err
 			case 429:
-				return nil, fmt.Errorf("authentication failed: rate limit exceeded")
+				return nil, err
 			default:
-				return nil, fmt.Errorf("authentication failed: %v", apiErr)
+				return nil, err
 			}
 		}
-		return nil, fmt.Errorf("authentication failed: %v", err)
+		return nil, err
 	}
 
 	// Update the client's tokens with the newly received ones
@@ -633,7 +682,7 @@ func (c *Client) GetCurrencies() (*t.Currencies, error) {
 	var currencies *t.Currencies
 	err := c.ApiRequest("GET", "/mkt/currencies/", Version, false, nil, &currencies)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching currencies: %v", err)
+		return nil, err
 	}
 	return currencies, nil
 }
@@ -697,7 +746,7 @@ func (c *Client) GetMarkets() (*t.Markets, error) {
 	var markets *t.Markets
 	err := c.ApiRequest("GET", "/mkt/markets/", Version, false, nil, &markets)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching markets: %v", err)
+		return nil, err
 	}
 	return markets, nil
 }
@@ -758,7 +807,7 @@ func (c *Client) GetTickers() (*t.Tickers, error) {
 	var tickers *t.Tickers
 	err := c.ApiRequest("GET", "/mkt/tickers/", Version, false, nil, &tickers)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching tickers: %v", err)
+		return nil, err
 	}
 	return tickers, nil
 }
@@ -806,7 +855,7 @@ func (c *Client) GetOrderBook(symbol string) (*t.OrderBook, error) {
 	var orderBook *t.OrderBook
 	err := c.ApiRequest("GET", fmt.Sprintf("/mth/orderbook/%s/", symbol), Version, false, nil, &orderBook)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching order book: %v", err)
+		return nil, err
 	}
 	return orderBook, nil
 }
@@ -879,7 +928,7 @@ func (c *Client) GetRecentTrades(symbol string) (*[]*t.Trade, error) {
 	var trades *[]*t.Trade
 	err := c.ApiRequest("GET", fmt.Sprintf("/mth/matches/%s/", symbol), Version, false, nil, &trades)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching recent trades: %v", err)
+		return nil, err
 	}
 	return trades, nil
 }
@@ -949,7 +998,7 @@ func (c *Client) GetWallets(params t.GetWalletParams) (*t.Wallets, error) {
 	var wallets *t.Wallets
 	err := c.ApiRequest("GET", "/wlt/wallets/", Version, true, params, &wallets)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching wallets: %v", err)
+		return nil, err
 	}
 	return wallets, nil
 }
@@ -1031,7 +1080,7 @@ func (c *Client) CreateOrder(params t.CreateOrderParams) (*t.OrderStatus, error)
 	var orderStatus *t.OrderStatus
 	err := c.ApiRequest("POST", "/odr/orders/", Version, true, params, &orderStatus)
 	if err != nil {
-		return nil, fmt.Errorf("error creating order: %v", err)
+		return nil, err
 	}
 	return orderStatus, nil
 }
@@ -1075,7 +1124,7 @@ func (c *Client) CreateOrder(params t.CreateOrderParams) (*t.OrderStatus, error)
 func (c *Client) CancelOrder(orderId int) error {
 	err := c.ApiRequest("DELETE", fmt.Sprintf("/odr/orders/%d/", orderId), Version, true, nil, nil)
 	if err != nil {
-		return fmt.Errorf("error canceling order: %v", err)
+		return err
 	}
 	return nil
 }
@@ -1161,7 +1210,7 @@ func (c *Client) GetOrdersHistory(params t.GetOrdersHistoryParams) (*t.OrderStat
 	var orders *t.OrderStatuses
 	err := c.ApiRequest("GET", "/odr/orders/", Version, true, params, &orders)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching order history: %v", err)
+		return nil, err
 	}
 	return orders, nil
 }
@@ -1248,7 +1297,7 @@ func (c *Client) GetOpenOrders(params t.GetOrdersHistoryParams) (*t.OrderStatuse
 	params.State = "active" // Automatically filter for active (open) orders
 	err := c.ApiRequest("GET", "/odr/orders/", Version, true, params, &orders)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching order history: %v", err)
+		return nil, err
 	}
 	return orders, nil
 }
@@ -1310,7 +1359,7 @@ func (c *Client) GetOrderStatuses(orderIds []string) (*t.OrderStatus, error) {
 	var orders *t.OrderStatus
 	err := c.ApiRequest("GET", fmt.Sprintf("/odr/orders/%v/", strings.Join(orderIds, ",")), Version, true, nil, &orders)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching order statuses: %v", err)
+		return nil, err
 	}
 	return orders, nil
 }
@@ -1390,7 +1439,7 @@ func (c *Client) GetUserTrades(params t.GetUserTradesParams) (*t.UserTrades, err
 	var trades *t.UserTrades
 	err := c.ApiRequest("GET", "/odr/fills/", Version, true, params, &trades)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching user trades: %v", err)
+		return nil, err
 	}
 	return trades, nil
 }
