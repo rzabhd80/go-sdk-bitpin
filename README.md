@@ -24,7 +24,7 @@ This is an unofficial SDK and is not affiliated with, endorsed by, or connected 
 ## Installation
 
 ```bash
-go get [github.com/rzabhd80/go-sdk-bitpin](https://github.com/rzabhd80/go-sdk-bitpin/)
+go get github.com/rzabhd80/go-sdk-bitpin
 ```
 
 ## Quick Start
