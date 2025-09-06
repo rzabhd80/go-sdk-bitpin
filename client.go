@@ -5,18 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	t "github.com/amiwrpremium/go-bitpin/types"
-	u "github.com/amiwrpremium/go-bitpin/utils"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	t "github.com/amiwrpremium/go-bitpin/types"
+	u "github.com/amiwrpremium/go-bitpin/utils"
 )
 
 // Constants defining the API base URL and version.
 const (
 	// BaseUrl is the root URL for the Bitpin Market API.
-	BaseUrl = "https://api.bitpin.market"
+	BaseUrl = "https://api.bitpin.ir"
 
 	// Version specifies the API version.
 	Version = "v1"
@@ -217,7 +218,7 @@ func (c *Client) createApiURI(endpoint string, version string) string {
 	if version == "" {
 		version = Version
 	}
-	return fmt.Sprintf("%s/api/%s%s", BaseUrl, version, endpoint)
+	return fmt.Sprintf("%s/api/%s%s", c.BaseUrl, version, endpoint)
 }
 
 // handleAutoRefresh ensures the client's tokens are valid and refreshes them if necessary.
