@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	t "github.com/amiwrpremium/go-bitpin/types"
-	u "github.com/amiwrpremium/go-bitpin/utils"
+	t "github.com/rzabhd80/go-sdk-bitpin/types"
+	u "github.com/rzabhd80/go-sdk-bitpin/utils"
 )
 
 // Constants defining the API base URL and version.
